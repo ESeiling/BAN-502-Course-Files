@@ -1,0 +1,192 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+##Seiling, Erin
+##Module 6
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+```
+
+```{r}
+trucks <- read_csv("trucks.csv")
+```
+
+
+## Task 1
+```{r}
+ggplot(trucks, aes(x=Distance, y=Speeding)) +
+  geom_point()
+```
+
+**Yes, there does appear to be a natural clustering of drivers.**
+
+## Task 2
+```{r}
+trucks = trucks %>% select(-Driver_ID)
+```
+
+```{r}
+kmeans_recipe = recipe(~ Distance + Speeding, trucks) 
+
+trucks_dummy = kmeans_recipe %>% 
+  step_scale(all_numeric()) %>%
+  step_center(all_numeric()) 
+
+trucks_dummy = prep(trucks_dummy, trucks) #prepares the recipe
+
+trucks_cleaned = bake(trucks_dummy, trucks) #applies the recipe and yields a data frame
+```
+
+```{r}
+summary(trucks_cleaned)
+summary(trucks)
+```
+
+## Task 3
+```{r}
+set.seed(64)
+clusts = 
+  tibble(k = 2) %>%
+  mutate(
+    kclust = map(k, ~kmeans(trucks_cleaned, .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, trucks_cleaned)
+  )
+
+clusts
+```
+```{r}
+clusters = 
+  clusts %>%
+  unnest(cols = c(tidied))
+
+assignments = 
+  clusts %>% 
+  unnest(cols = c(augmented))
+
+clusterings = 
+  clusts %>%
+  unnest(cols = c(glanced))
+```
+
+```{r}
+p1 = 
+  ggplot(assignments, aes(x = Distance, y = Speeding)) +
+  geom_point(aes(color = .cluster), alpha = 0.8) + 
+  facet_wrap(~ k)
+p1
+```
+
+**There is a clear clustering of drivers. There may be one red point around distance = 0.8 that should be in Cluster 2.**
+
+
+##Task 4
+```{r}
+set.seed(412)
+clusts = 
+  tibble(k = 1:8) %>%
+  mutate(
+    kclust = map(k, ~kmeans(trucks_cleaned, .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, trucks_cleaned)
+  )
+
+clusts
+```
+
+```{r}
+clusters = 
+  clusts %>%
+  unnest(cols = c(tidied))
+
+assignments = 
+  clusts %>% 
+  unnest(cols = c(augmented))
+
+clusterings = 
+  clusts %>%
+  unnest(cols = c(glanced))
+```
+
+```{r}
+p1 = 
+  ggplot(assignments, aes(x = Distance, y = Speeding)) +
+  geom_point(aes(color = .cluster), alpha = 0.8) + 
+  facet_wrap(~ k)
+p1
+```
+
+Elbow Diagram
+```{r}
+ggplot(clusterings, aes(k, tot.withinss)) +
+  geom_line() +
+  geom_point()
+```
+
+**4 appears to be the best value for k.**
+
+## Task 5
+```{r}
+points = trucks_cleaned
+
+set.seed(412)
+kclust = kmeans(points, centers = 4)
+kclust
+```
+
+Add the cluster assignment to the dataset  
+```{r}
+points = augment(kclust, points)
+points
+```
+Plot the clusters
+```{r}
+ggplot(points, aes(Distance, Speeding, color = .cluster)) +
+  geom_point(alpha = 0.4) + theme_bw()
+```
+
+**The best value of k appears to be 4.**
+
+## Task 6
+```{r}
+set.seed(64)
+clusts = 
+  tibble(k = 4) %>%
+  mutate(
+    kclust = map(k, ~kmeans(trucks_cleaned, .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, trucks_cleaned)
+  )
+
+clusts
+```
+```{r}
+clusters = 
+  clusts %>%
+  unnest(cols = c(tidied))
+
+assignments = 
+  clusts %>% 
+  unnest(cols = c(augmented))
+
+clusterings = 
+  clusts %>%
+  unnest(cols = c(glanced))
+```
+
+```{r}
+p1 = 
+  ggplot(assignments, aes(x = Distance, y = Speeding)) +
+  geom_point(aes(color = .cluster), alpha = 0.8) + 
+  facet_wrap(~ k)
+p1
+```
+
+**Using color and visualization, it is easy to see that 4 clusters makes sense for this data. There is a very clear difference between the red/pink dots and the blue dots that was not as easy to see when we did Task 3. Similarly, there is a clear difference between the green dots and the purple dots, which did tend to blend together when we ran the model in Task 3. This is a good reminder not to trust your first visualization, and to do the elbow test to be sure we have an appropriate k.**

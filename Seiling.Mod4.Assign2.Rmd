@@ -1,0 +1,239 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+```{r warning = FALSE, message=FALSE}
+#install.packages("gridExtra")
+#install.packages("vip")
+#install.packages("ranger")
+#install.packages("skimr")
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(gridExtra)
+library(vip)
+library(ranger)
+library(skimr)
+```
+
+```{r}
+drug_data_1 <- read_csv("drug_data-1.csv")
+drug = drug_data_1
+```
+
+Name columns
+```{r}
+names(drug) <- c("ID", "Age", "Gender", "Education", "Country", "Ethnicity", "Nscore", "Escore", "Oscore", "Ascore", "Cscore", "Impulsive", "SS", "Alcohol", "Amphet", "Amyl", "Benzos", "Caff", "Cannabis", "Choc", "Coke", "Crack", "Ecstasy", "Herion", "Ketamine", "Legalh", "LSD", "Meth", "Mushrooms", "Nicotine", "Semer", "VSA")
+
+#str(drug)
+```
+
+Code factor levels
+```{r}
+drug[drug == "CL0"] = "No"
+drug[drug == "CL1"] = "No"
+drug[drug == "CL2"] = "Yes"
+drug[drug == "CL3"] = "Yes"
+drug[drug == "CL4"] = "Yes"
+drug[drug == "CL5"] = "Yes"
+drug[drug == "CL6"] = "Yes"
+```
+
+Factor conversion & recoding
+```{r}
+drug_clean = drug %>% mutate_at(vars(Age:Ethnicity), funs(as_factor)) %>%
+mutate(Age = factor(Age, labels = c("18_24", "25_34", "35_44",
+"45_54", "55_64", "65_"))) %>%
+mutate(Gender = factor(Gender, labels = c("Male", "Female"))) %>%
+mutate(Education = factor(Education, labels =
+c("Under16", "At16", "At17", "At18", "SomeCollege",
+"ProfessionalCert", "Bachelors", "Masters", "Doctorate"))) %>%
+mutate(Country = factor(Country,
+labels = c("USA", "NewZealand", "Other", "Australia",
+"Ireland","Canada","UK"))) %>%
+mutate(Ethnicity = factor(Ethnicity,
+labels = c("Black", "Asian", "White", "White/Black", "Other",
+"White/Asian", "Black/Asian"))) %>%
+  mutate_at(vars(Alcohol:VSA), funs(as_factor)) %>%
+select(-ID)
+#str(drug_clean)
+```
+
+Remove all drugs except Nicotine
+```{r}
+drug_clean = drug_clean %>% select(!(Alcohol:Mushrooms)) %>% select(!(Semer:VSA))
+names(drug_clean)
+#str(drug_clean)
+#summary(drug_clean)
+skim(drug_clean)
+```
+
+## Task 1. Missingness
+**There are no missing values in the drug_clean dataframe, as confirmed by the "skimr" package.**
+
+## Task 2. Split into Training and Testing
+```{r}
+set.seed(1234)
+drug_split <- initial_split(drug_clean, prop = 0.7, strata = Nicotine) #70% in training
+train = training(drug_split)
+test = testing(drug_split)
+
+```
+
+## Task 3. Visualizations
+```{r}
+p1 = ggplot(train, aes(Age, fill = Nicotine)) + geom_bar(position="fill")
+p2 = ggplot(train, aes(Gender, fill = Nicotine)) + geom_bar(position="fill")
+p3 = ggplot(train, aes(Education, fill = Nicotine)) + geom_bar(position="fill") +theme(axis.text.x=element_text(angle=90))
+p4 = ggplot(train, aes(Country, fill = Nicotine)) + geom_bar(position="fill")+ theme(axis.text.x=element_text(angle=90))
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(train, aes(Ethnicity, fill = Nicotine)) + geom_bar(position="fill")+ theme(axis.text.x=element_text(angle=90))
+p2 = ggplot(train, aes(x=Nicotine, y=Nscore)) +geom_boxplot()
+p3 = ggplot(train, aes(x=Nicotine, y=Escore)) +geom_boxplot()
+p4 = ggplot(train, aes(x=Nicotine, y=Oscore)) +geom_boxplot()
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(train, aes(x=Nicotine, y=Ascore)) +geom_boxplot()
+p2 = ggplot(train, aes(x=Nicotine, y=Cscore)) +geom_boxplot()
+p3 = ggplot(train, aes(x=Nicotine, y=Impulsive)) +geom_boxplot()
+p4 = ggplot(train, aes(x=Nicotine, y=SS)) +geom_boxplot()
+grid.arrange(p1,p2,p3,p4)
+```
+
+**Based on the visualizations, older people use less Nicotine than younger people. Males use more Nicotine than females. Increasing levels of education correlates to a decrease in Nicotine usage. Country influences Nicotine use with usage being lowest in New Zealand and highest in Ireland. Ethnicity also correlates to Nicotine use with Blacks using the least and White/Asians using most. People with a nuerotic personality (Nscore) are more likely to use Nicotine than those without. People with "openness to experience" (Oscore) personality measurement have a higher rate of Nicotine usage than those without this trait. People with the conscientiousness personality trait (Cscore) are less likely to use Nicotine than those without this trait. People who are Impulsive use Nicotine at higher rates than those who are not. People who are sensation-seeking (SS) use Nicotine at higher rates than those who are not.**
+
+**The two characteristics that do not appear to have any influence on Nicotine usage are Extraversion (Escore) and Agreeableness (Ascore).**
+
+## Task 4. Random Forest Model
+
+Set up folds
+```{r}
+set.seed(123)
+rf_folds = vfold_cv(train, v=5)
+```
+
+Random Forest with R-defined tuning grid
+```{r}
+drug_recipe = recipe(Nicotine ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees =100) %>%
+  set_engine("ranger", importance ="permutation") %>%
+  set_mode("classification")
+
+drug_wflow =
+  workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(drug_recipe)
+
+rf_grid = grid_regular(
+  mtry(range = c(2,8)),
+  min_n(range =c(5, 20)),
+  levels = 10
+)
+
+set.seed(123)
+rf_res_tuned = tune_grid(
+  drug_wflow,
+  resamples = rf_folds, 
+  grid = rf_grid
+)
+```
+
+Visualize
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+               values_to ="value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x=NULL, y ="Accuracy")
+```
+
+## Task 5. Finalize Workflow
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+```
+
+Tune model for accuracy
+```{r}
+best_rf = select_best(rf_res_tuned, "accuracy")
+
+final_rf = finalize_workflow(
+  drug_wflow, 
+  best_rf
+)
+
+final_rf
+```
+
+Fit final workflow on training
+```{r}
+final_rf_fit = fit(final_rf, train)
+```
+
+Check variable importance
+```{r}
+final_rf_fit %>% extract_fit_parsnip()%>% vip(geom = "point")
+```
+**The variables that are most important in the model are: sensation seeking (SS), Country (with UK being most predictive), and age (with 45-54 being most predictive).**
+
+
+## Task 6. 
+
+Predict on training
+```{r}
+trainpredrf = predict(final_rf_fit, train)
+head(trainpredrf)
+```
+Confusion Matrix
+```{r}
+confusionMatrix(trainpredrf$.pred_class, train$Nicotine,
+                positive = "Yes")
+```
+
+Predictions on Testing
+```{r}
+testpredrf = predict(final_rf_fit, test)
+head(testpredrf)
+
+```
+
+Confusion Matrix
+
+```{r}
+confusionMatrix(testpredrf$.pred_class, test$Nicotine,
+                positive = "Yes")
+```
+**The model is 94% accurate on the training set, but only 71% accurate on the testing set. Additionally, the p-value for the model on the testing set is not significant. This indicates that the model is overfit and does not preform well "in the real world" or on data it has not seen.**
+
+## Task 7. 
+**Insurance companies could use similar models to predict whether or not the person they are insuring is likely to be a smoker. These predictions can be used to either target people for smoker-cessation programs, or could also be used as part of the calculation for higher insurance premiums (based on someone being "predicted" to be a smoker). Medical providers could use this information in a similar way - targeting certain individuals predicted to be smokers for conversations about smoking cessation.**
+
+
+**I would not recommend this particular model for real-world use, since it did not perform well on the Testing dataframe. Aside from the model itself not performing well in "real-world" situations I would be concerned that insurance companies would use the model to raise the rates of individuals "predicted" to be smokers, without validating their Nicotine use.**
+
+Save model for later
+```{r}
+saveRDS(final_rf_fit, "final_rf_fit.rds")
+```
+

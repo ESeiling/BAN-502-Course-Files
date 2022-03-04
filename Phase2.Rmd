@@ -1,0 +1,1007 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+## Seiling, Erin
+## Final Project, Phase 2
+
+```{r, warning =FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(GGally)
+library(gridExtra)
+library(esquisse)
+library(shiny)
+library(gridExtra)
+library(ggplot2)
+library(caret)
+library(VIM)
+library(ranger)
+library(vip)
+library(xgboost)
+library(nnet)
+library(stacks)
+library(ROCR)
+library(e1071)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(RColorBrewer)
+library(plyr)
+library(usemodels)
+library(nnet)
+library(stacks)
+```
+
+
+Load Ames data
+```{r}
+ames_student <- read_csv("ames_student.csv")
+ames <- ames_student
+#str(ames)
+#summary(ames)
+#skim(ames)
+```
+
+## Data Cleaning
+
+Mutate
+```{r}
+ames <-ames %>% mutate_if(is.character, as_factor)
+#summary(ames)
+```
+
+Rename Factor levels in Month Sold
+```{r}
+months <-c("Mo_Sold")
+ames[,months] <-lapply(ames[,months], factor)
+
+ames$Mo_Sold <- fct_recode(ames$Mo_Sold, Jan = "1", Feb = "2", Mar = "3", Apr = "4", May = "5", Jun = "6", Jul = "7", Aug = "8", Sep = "9", Oct = "10", Nov = "11", Dec = "12" )
+#str(ames)
+```
+
+Reorder factor levels for Above Median
+```{r}
+ames$Above_Median <- factor(ames$Above_Median, levels =c("No", "Yes"))
+```
+
+Combine full and half baths
+```{r}
+ames <- mutate(ames, Bath = Bsmt_Full_Bath + Full_Bath +.5*Bsmt_Half_Bath + .5*Half_Bath)
+ames <-select(ames, -Bsmt_Full_Bath, -Full_Bath, -Bsmt_Half_Bath, -Half_Bath)
+```
+
+Combine Porches and Decks into one variable
+```{r}
+ames <-mutate(ames, Porch = Wood_Deck_SF + Open_Porch_SF + Enclosed_Porch + Three_season_porch + Screen_Porch)
+ames <-select(ames, -Wood_Deck_SF, -Open_Porch_SF, -Enclosed_Porch, -Three_season_porch, -Screen_Porch)
+```
+
+Create total living area variable
+```{r}
+ames <-mutate(ames, Total_Living_SF = BsmtFin_SF_1 + BsmtFin_SF_2 + Gr_Liv_Area)
+ames <-select(ames, -BsmtFin_SF_1, -BsmtFin_SF_2, -Gr_Liv_Area)
+#summary(ames) #Check remaining variables
+```
+
+Looking at MS_Zoning, I want to focus on residential zoning, so remove observations that are not zoned residential.
+```{r}
+ames_clean <- filter(ames, MS_Zoning !="C_all")
+ames_clean <- filter(ames_clean, MS_Zoning !="A_agr")
+ames_clean <- filter(ames_clean, MS_Zoning !="I_all")
+```
+
+Based on previous visualizations (Phase 1), remove variables that are not predictive
+```{r}
+ames_clean <- select(ames_clean, -Alley, -Street, -Utilities, -Heating, -Heating_QC, -Pool_QC, -Pool_Area, -Lot_Frontage, -Land_Slope, -Roof_Style, -Exterior_1st, -Exterior_2nd, -Bedroom_AbvGr, -Kitchen_AbvGr, -TotRms_AbvGrd, -Functional, -Paved_Drive, -Misc_Feature, -Misc_Val, -Mo_Sold, -Year_Sold, -Electrical, -Bsmt_Unf_SF, -Bsmt_Qual, -Bsmt_Cond, -Bsmt_Exposure, -BsmtFin_Type_1, -BsmtFin_Type_2, -Total_Bsmt_SF, -First_Flr_SF, -Second_Flr_SF, -Low_Qual_Fin_SF, -MS_SubClass, -Garage_Type, -Garage_Cars, -Garage_Finish, -Garage_Cond, -Latitude, -Longitude)
+```
+
+**Visualize remaining Continuous variables to identify/remove outliers**
+
+Total Living Sq Ft
+```{r}
+ggplot(ames_clean, aes(x=Total_Living_SF)) +
+  geom_histogram()
+```
+
+Lot Area
+```{r}
+ggplot(ames_clean, aes(x=Lot_Area)) +
+  geom_histogram()
+```
+
+Year Built
+```{r}
+ggplot(ames_clean, aes(x=Year_Built)) +
+  geom_histogram()
+```
+
+Garage Area
+```{r}
+ggplot(ames_clean, aes(x=Garage_Area)) +
+  geom_histogram()
+```
+
+Filter to remove outliers: homes with lot area greater than 50000, homes less than 3800 total living area, homes built after 1920, Garage Area less than 1200
+```{r}
+ames_clean <- ames_clean %>% filter(Lot_Area <40000)
+ames_clean <-ames_clean %>% filter(Total_Living_SF <3800)
+ames_clean <-ames_clean %>% filter(Year_Built >1920)
+ames_clean <- ames_clean %>% filter(Garage_Area <1200)
+summary(ames_clean)
+```
+
+Split data into training and testing sets
+```{r}
+set.seed(123) 
+ames_split <- initial_split(ames_clean, prop = 0.70, strata = Above_Median)
+train<-training(ames_split)
+test<-testing(ames_split)
+```
+
+Set up folds
+```{r}
+set.seed(123) 
+folds=vfold_cv(train, v=5)
+```
+
+## Logistic Regression 
+
+All predictor variables
+```{r}
+log_recipe = recipe(Above_Median ~., train) %>%
+  step_other(Neighborhood, threshold = 0.01) %>%
+  step_other(Kitchen_Qual, threshold = 0.01) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+ 
+logmod = 
+  logistic_reg(mode="classification") %>%
+  set_engine("glm")
+
+logreg_wf = workflow() %>%
+  add_recipe(log_recipe) %>%
+  add_model(logmod)
+
+ames_logfit = fit(logreg_wf, train)
+```
+
+```{r}
+summary(ames_logfit$fit$fit$fit)
+```
+
+Remove nonpredictive variables
+```{r}
+log_recipe2 = recipe(Above_Median ~ Lot_Area + Year_Built + Fireplaces + Bath + Total_Living_SF + Neighborhood + Overall_Qual + Kitchen_Qual, train) %>%
+  step_other(Neighborhood, threshold = 0.01) %>%
+  step_other(Kitchen_Qual, threshold = 0.01) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+ 
+logmod = 
+  logistic_reg(mode="classification") %>%
+  set_engine("glm")
+
+logreg_wf = workflow() %>%
+  add_recipe(log_recipe2) %>%
+  add_model(logmod)
+
+ames_logfit2 = fit(logreg_wf, train)
+```
+
+```{r}
+summary(ames_logfit2$fit$fit$fit)
+```
+
+
+Develop Predictions, extract "yes" prediction
+```{r}
+predictions <- predict(ames_logfit2, train, type = "prob") [2] #using best model
+head(predictions)
+```
+
+Threshold Selection
+```{r}
+ROCRpred = prediction(predictions, train$Above_Median)
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, colorize = TRUE, print.cutoffs.at=seq(0,1, by=0.1), text.adj=c(-0.2, 1.7))
+```
+
+Determine threshold to balance sensitivity and specificity
+```{r}
+opt.cut = function(perf, pred) {
+  cut.ind = mapply(FUN=function(x,y,p) {
+    d = (x-0)^2 + (y-1)^2
+    ind = which(d==min(d))
+    c(sensitivity = y[[ind]], specificity = 1-x[[ind]],
+      cutoff = p[[ind]])
+  }, perf@x.values, perf@y.values, pred@cutoffs)
+}
+print(opt.cut(ROCRperf, ROCRpred))
+```
+
+Test thresholds to evaluate accuracy
+```{r}
+t1 = table(train$Above_Median, predictions > 0.4311758)
+t1
+```
+
+Calculate accuracy on Train
+```{r}
+(t1[1,1]+t1[2,2])/nrow(train)
+```
+
+Use threshold above to determine accuracy of model on testing set.
+```{r}
+predictions2 <- predict(ames_logfit, test, type = "prob") [2] #using best model and test set
+head(predictions2)
+
+```
+
+Calculate accuracy on Test
+```{r}
+t2 = table(test$Above_Median, predictions2 > 0.4311758)
+t2
+
+(t2[1,1]+t2[2,2])/nrow(test)
+```
+
+**The final Logistic Regression model includes the following predictor variables: Lot Area, Year Built, Fireplaces, Baths (total), Total Living Sq Ft, Neighborhood, Overall Quality and Kitchen Quality. The AIC value of this model is 598.57, and improvement over the AIC value of 621.6 found using all possible predictors. The model is 0.92 accrurate on the Training Data, and 0.89 accurate on the Testing Data.**
+
+
+## Classification Tree with tuning
+
+Create model
+```{r}
+# class_recipe = recipe(Above_Median ~., train) %>%
+#   step_other(Neighborhood, threshold = 0.01) %>%
+#   step_other(Kitchen_Qual, threshold = 0.01) %>%
+#   step_dummy(all_nominal(), -all_outcomes())
+# 
+# tree_model = decision_tree(cost_complexity = tune()) %>%
+#   set_engine("rpart", model = TRUE) %>%
+#   set_mode("classification")
+# 
+# tree_grid= grid_regular(cost_complexity(),
+#                         levels = 25) #try 25 values for Cp
+# 
+# class_wflow = 
+#   workflow() %>%
+#   add_model(tree_model) %>%
+#   add_recipe(class_recipe)
+# 
+# tree_res = 
+#   class_wflow %>%
+#   tune_grid(
+#     resamples = folds,
+#     grid = tree_grid
+#   )
+# 
+# tree_res
+```
+
+Save Model
+```{r}
+#saveRDS(tree_res,"tree_res.rds")
+```
+
+Load Model
+```{r}
+tree_res = readRDS("tree_res.rds")
+```
+
+
+Visualize
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow =2)
+```
+
+Which cp value yields optimal accuracy?
+```{r}
+ class_recipe = recipe(Above_Median ~., train) %>%
+    step_other(Neighborhood, threshold = 0.01) %>%
+   step_other(Kitchen_Qual, threshold = 0.01) %>%
+   step_dummy(all_nominal(), -all_outcomes())
+
+ tree_model = decision_tree(cost_complexity = tune()) %>%
+   set_engine("rpart", model = TRUE) %>%
+   set_mode("classification")
+ 
+ tree_grid= expand.grid(cost_complexity= seq(0.001, 0.02, by=0.001)) 
+                  
+ class_wflow = 
+   workflow() %>%
+   add_model(tree_model) %>%
+   add_recipe(class_recipe)
+ 
+ tree_res2 = 
+   class_wflow %>%
+   tune_grid(
+    resamples = folds,
+     grid = tree_grid
+   )
+ 
+ tree_res2
+```
+
+Plot
+```{r}
+tree_res2 %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow =2)
+```
+
+```{r}
+best_tree = tree_res2 %>%
+  select_best("accuracy")
+
+best_tree
+```
+**Best CP for accuracy is 0.017**
+
+Plot tree using best CP
+```{r}
+final_wf = 
+  class_wflow %>%
+  finalize_workflow(best_tree)
+```
+
+```{r}
+final_fit = fit(final_wf, train)
+
+tree = final_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit")
+  
+fancyRpartPlot(tree)
+```
+
+Predictions on training set
+```{r}
+treepred = predict(final_fit, train, type = "class")
+head(treepred)
+```
+Confusion Matrix
+```{r}
+confusionMatrix(treepred$.pred_class,train$Above_Median, positive="Yes")
+```
+
+**Accuracy is 0.93 (rounded) on Training set.**
+
+Predictions on Testing Set
+```{r}
+final_fit = fit(final_wf, test)
+
+tree = final_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit")
+
+```
+
+```{r}
+treepred = predict(final_fit, test, type = "class")
+head(treepred)
+
+```
+
+Accuracy on Testing Set
+```{r}
+confusionMatrix(treepred$.pred_class,test$Above_Median, positive="Yes")
+```
+
+**Accuracy on Test set is 0.93 (rounded)**
+
+## Random Forest with tuning
+
+Create model 
+```{r}
+ # rf_recipe = recipe(Above_Median ~., train) %>%
+ #   step_other(Neighborhood, threshold = 0.01) %>%
+ #   step_other(Kitchen_Qual, threshold = 0.01) %>%
+ #   step_dummy(all_nominal(), -all_outcomes())
+ # 
+ # rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 200) %>% #
+ #   set_engine("ranger", importance = "permutation") %>% 
+ #   set_mode("classification")
+ # 
+ # rf_wflow = 
+ #   workflow() %>% 
+ #   add_model(rf_model) %>% 
+ #   add_recipe(rf_recipe)
+ # 
+ # rf_res = tune_grid(
+ #   rf_wflow,
+ #   resamples = folds,
+ #   grid = 20 #try 20 different combinations of the random forest tuning parameters
+ # )
+```
+Save model
+```{r}
+#saveRDS(rf_res,"rf_res.rds")
+```
+
+Load model
+```{r}
+rf_res = readRDS("rf_res.rds")
+```
+
+
+Look at parameter performance (borrowed from https://juliasilge.com/blog/sf-trees-random-tuning/)
+```{r}
+ rf_res %>%
+   collect_metrics() %>%
+   filter(.metric == "accuracy") %>%
+   select(mean, min_n, mtry) %>%
+   pivot_longer(min_n:mtry,
+     values_to = "value",
+     names_to = "parameter"
+   ) %>%
+   ggplot(aes(value, mean, color = parameter)) +
+   geom_point(show.legend = FALSE) +
+   facet_wrap(~parameter, scales = "free_x") +
+   labs(x = NULL, y = "Accuracy")
+```
+
+
+Refine Parameters
+```{r}
+  rf_recipe = recipe(Above_Median ~., train) %>%
+  step_other(Neighborhood, threshold = 0.01) %>%
+   step_other(Kitchen_Qual, threshold = 0.01) %>%
+    step_dummy(all_nominal(), -all_outcomes())
+ 
+ rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 200) %>% 
+  set_engine("ranger", importance = "permutation") %>% 
+   set_mode("classification")
+ 
+ rf_wflow = 
+   workflow() %>% 
+   add_model(rf_model) %>% 
+   add_recipe(rf_recipe)
+ 
+ rf_grid = grid_regular(
+   mtry(range = c(20, 50)), 
+    min_n(range = c(0, 30)), 
+  levels = 5
+ )
+ 
+ rf_res_tuned = tune_grid(
+   rf_wflow,
+    resamples = folds,
+   grid = rf_grid 
+ )
+```
+
+Visualize
+```{r}
+ rf_res_tuned %>%
+   collect_metrics() %>%
+   filter(.metric == "accuracy") %>%
+   select(mean, min_n, mtry) %>%
+   pivot_longer(min_n:mtry,
+     values_to = "value",
+     names_to = "parameter"
+   ) %>%
+   ggplot(aes(value, mean, color = parameter)) +
+   geom_point(show.legend = FALSE) +
+   facet_wrap(~parameter, scales = "free_x") +
+   labs(x = NULL, y = "Accuracy")
+```
+
+Alternate view of the parameters  
+```{r}
+ rf_res_tuned %>%
+   collect_metrics() %>%
+   filter(.metric == "accuracy") %>%
+   mutate(min_n = factor(min_n)) %>%
+   ggplot(aes(mtry, mean, color = min_n)) +
+   geom_line(alpha = 0.5, size = 1.5) +
+   geom_point() +
+    labs(y = "Accuracy")
+```
+
+
+```{r}
+  best_rf = select_best(rf_res_tuned, "accuracy")
+ 
+ final_rf = finalize_workflow(
+   rf_wflow,
+   best_rf
+ )
+ 
+ final_rf
+```
+
+Fit final workflow on training
+```{r}
+final_rf_fit = fit(final_rf, train)
+```
+
+Check out variable importance
+```{r}
+final_rf_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+Predictions  
+```{r}
+trainpredrf = predict(final_rf_fit, train)
+head(trainpredrf)
+```
+
+Confusion matrix
+```{r}
+confusionMatrix(trainpredrf$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+**Accuracy on Train is 0.97**
+
+Predictions on test
+```{r}
+ testpredrf = predict(final_rf_fit, test)
+ head(testpredrf)
+ 
+ confusionMatrix(testpredrf$.pred_class, test$Above_Median, 
+                 positive = "Yes")
+```
+**Accuracy on Test is 0.92**
+
+
+## XBG Model
+
+```{r}
+#use_xgboost(Above_Median ~., train) 
+```
+
+```{r}
+
+ # start_time = Sys.time()
+ # 
+ # xgboost_recipe <- 
+ #    recipe(formula = Above_Median ~ ., data = train) %>% 
+ #    step_novel(all_nominal_predictors()) %>% 
+ #     step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+ #    step_zv(all_predictors()) 
+ #  
+ #  xgboost_spec <- 
+ #    boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), 
+ #      loss_reduction = tune(), sample_size = tune()) %>% 
+ #      set_mode("classification") %>% 
+ #     set_engine("xgboost") 
+ #  
+ #  xgboost_workflow <- 
+ #    workflow() %>% 
+ #    add_recipe(xgboost_recipe) %>% 
+ #    add_model(xgboost_spec) 
+ # 
+ # set.seed(64069)
+ #    xgboost_tune <-
+ #    tune_grid(xgboost_workflow, resamples = folds, grid = 25)
+ #  
+ #  end_time = Sys.time()
+ #  end_time-start_time
+
+```
+
+
+```{r}
+# ```{R}
+# best_xgb = select_best(xgboost_tune, "accuracy")
+# 
+# final_xgb = finalize_workflow(
+#   xgboost_workflow,
+#   best_xgb
+# )
+# 
+# final_xgb_fit = fit(final_xgb, train)
+# ```
+```
+
+
+Save Model
+```{r}
+#saveRDS(final_xgb_fit,"final_xgb_fit.rds")
+```
+
+Load model
+```{r}
+final_xgb_fit = readRDS("final_xgb_fit.rds")
+```
+
+
+Predict on Train
+```{r}
+predxgbtrain = predict(final_xgb_fit, train)
+confusionMatrix(train$Above_Median, predxgbtrain$.pred_class, positive="Yes")
+```
+
+**Accuracy on Training set is 0.95(rounded)**
+
+Predict on Test
+```{r}
+predxgbtest = predict(final_xgb_fit, test)
+confusionMatrix(test$Above_Median, predxgbtest$.pred_class, positive="Yes")
+```
+
+**Accuracy on Testing Set is 0.91.**
+
+Tune XGB Model
+```{r}
+ start_time = Sys.time() #for timing
+ 
+ tgrid = expand.grid(
+   trees = 100, 
+   min_n = 1, 
+   tree_depth = c(1,2,3,4), 
+   learn_rate = c(0.01, 0.1, 0.2, 0.3, 0.4),  
+   loss_reduction = 0, 
+   sample_size = c(0.5, 0.75, 1)) 
+ 
+ xgboost_recipe <- 
+   recipe(formula = Above_Median ~ ., data = train) %>% 
+   step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>% 
+   step_zv(all_predictors()) 
+ 
+ xgboost_spec <- 
+   boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), 
+     loss_reduction = tune(), sample_size = tune()) %>% 
+   set_mode("classification") %>% 
+   set_engine("xgboost") 
+ 
+ xgboost_workflow <- 
+ workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+   add_model(xgboost_spec) 
+ 
+ set.seed(99786)
+ xgboost_tune2 <-
+   tune_grid(xgboost_workflow, resamples = folds, grid = tgrid)
+ 
+ end_time = Sys.time()
+ end_time-start_time
+```
+
+
+
+```{r}
+best_xgb2 = select_best(xgboost_tune2, "accuracy")
+
+final_xgb2 = finalize_workflow(
+  xgboost_workflow,
+  best_xgb2
+)
+
+final_xgb_fit2 = fit(final_xgb2, train)
+```
+
+Predict on Train
+```{r}
+predxgbtrain2 = predict(final_xgb_fit2, train)
+confusionMatrix(train$Above_Median, predxgbtrain2$.pred_class,positive="Yes")
+```
+
+**Tuned model is 0.93 accurate on Training set.**
+
+Predict on Test
+```{r}
+predxgbtest2 = predict(final_xgb_fit2, test)
+confusionMatrix(test$Above_Median, predxgbtest2$.pred_class,positive="Yes")
+```
+
+**Tuned model is 0.91 accurte on Testing set.**
+
+
+## Neural Network
+
+Neural Network with R Controlled Tuning
+```{r}
+ start_time = Sys.time() #for timing
+
+ nn_recipe = recipe(Above_Median ~., train) %>%
+   step_normalize(all_predictors(), -all_nominal()) %>% 
+   step_dummy(all_nominal(), -all_outcomes())
+ 
+ nn_model = 
+   mlp(hidden_units = tune(), penalty = tune(), 
+       epochs = tune()) %>%
+   set_mode("classification") %>% 
+   set_engine("nnet", verbose = 0) #verbose = 0 reduces output from the model
+   
+ nn_workflow <- 
+   workflow() %>% 
+   add_recipe(nn_recipe) %>% 
+   add_model(nn_model) 
+ 
+ set.seed(1234)
+ neural_tune <-
+   tune_grid(nn_workflow, resamples = folds, grid = 25)
+ 
+ end_time = Sys.time()
+ end_time-start_time
+```
+
+
+```{r}
+neural_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, hidden_units, penalty, epochs) %>%
+  pivot_longer(hidden_units:epochs,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+```{r}
+best_nn = select_best(neural_tune, "accuracy")
+
+final_nn = finalize_workflow(
+  nn_workflow,
+  best_nn
+)
+
+final_nn
+```
+
+Fit workflow on Train
+```{r}
+final_nn_fit = fit(final_nn, train)
+```
+
+Predict on Train
+```{r}
+trainprednn = predict(final_nn_fit, train)
+head(trainprednn)
+```
+
+Confusion matrix
+```{r}
+confusionMatrix(trainprednn$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+**Model is 0.96 accurate on Training set.**
+
+
+Predict on Test
+```{r}
+testprednn = predict(final_nn_fit, test)
+head(testprednn)
+```
+Confusion Matrix for Test
+```{r}
+confusionMatrix(testprednn$.pred_class, test$Above_Median, 
+                positive = "Yes")
+```
+
+**Model is 0.91 accurate on Testing set.**
+
+
+Tune Neural Network Model Parameters
+```{r}
+ start_time = Sys.time() 
+ 
+ neural_grid = grid_regular(
+   hidden_units(range = c(1,2)),
+   penalty(range = c(-10,-1)), 
+   epochs(range = c(10,100)),
+   levels = 10
+ )
+   
+ nn_recipe = recipe(Above_Median ~., train) %>%
+   step_normalize(all_predictors(), -all_nominal()) 
+ 
+ nn_model = 
+   mlp(hidden_units = tune(), penalty = tune(), 
+       epochs = tune()) %>%
+   set_mode("classification") %>% 
+   set_engine("nnet", verbose = 0) 
+   
+ nn_workflow <- 
+   workflow() %>% 
+   add_recipe(nn_recipe) %>% 
+   add_model(nn_model) 
+ 
+ set.seed(1234)
+ neural_tune2 <-
+   tune_grid(nn_workflow, resamples = folds, grid = neural_grid)
+ 
+ end_time = Sys.time()
+ end_time-start_time
+```
+
+
+```{r}
+neural_tune2 %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, hidden_units, penalty, epochs) %>%
+  pivot_longer(hidden_units:epochs,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+```{r}
+best_nn = select_best(neural_tune2, "accuracy")
+
+final_nn = finalize_workflow(
+  nn_workflow,
+  best_nn
+)
+
+final_nn
+```
+
+Fit final on Training Data
+```{r}
+final_nn_fit2 = fit(final_nn, train)
+```
+
+```{r}
+trainprednn = predict(final_nn_fit2, train)
+head(trainprednn)
+```
+
+Confusion matrix
+```{r}
+confusionMatrix(trainprednn$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+**Tuned model is 0.96(rounded) accurate on Training set.**
+
+Predict on Test
+```{r}
+testprednn = predict(final_nn_fit2, test)
+head(testprednn)
+```
+
+Confusion Matrix for Test
+```{r}
+confusionMatrix(testprednn$.pred_class, test$Above_Median, 
+                positive = "Yes")
+```
+
+**Tuned model is 0.90 accurate on Testing set.**
+
+
+## Ensemble Model
+Classification Tree, Random Forest, XGBoost, and Neural Network
+
+```{r}
+ames_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+  
+
+ctrl_grid = control_stack_grid() 
+ctrl_res = control_stack_resamples() 
+```
+
+Classification Tree Model
+```{r}
+tree_model = decision_tree(cost_complexity = tune()) %>% 
+  set_engine("rpart", model = TRUE) %>% 
+  set_mode("classification")
+
+tree_recipe = ames_recipe %>%
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_workflow = workflow() %>%
+  add_model(tree_model) %>%
+  add_recipe(tree_recipe)
+
+set.seed(1234)
+tree_res = 
+  tree_workflow %>% 
+  tune_grid(
+    resamples = folds,
+    grid = 25,
+    control = ctrl_grid #needed for stacking
+    )
+```
+
+Random Forest Model
+```{r}
+
+ rf_recipe = recipe(Above_Median ~., train) %>%
+     step_other(Neighborhood, threshold = 0.01) %>%
+     step_other(Kitchen_Qual, threshold = 0.01) %>%
+     step_dummy(all_nominal(), -all_outcomes())
+   
+   rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 200) %>% #
+     set_engine("ranger", importance = "permutation") %>% 
+     set_mode("classification")
+   
+   rf_wflow = 
+     workflow() %>% 
+     add_model(rf_model) %>% 
+     add_recipe(rf_recipe)
+   
+   rf_res = tune_grid(
+    rf_wflow,
+     resamples = folds,
+     grid = 20 #try 20 different combinations of the random forest tuning parameters
+   )
+```
+
+
+Neural Network Model
+```{r}
+  nn_recipe = recipe(Above_Median ~., train) %>%
+    step_normalize(all_predictors(), -all_nominal()) %>% 
+    step_dummy(all_nominal(), -all_outcomes())
+  
+  nn_model = 
+    mlp(hidden_units = tune(), penalty = tune(), 
+        epochs = tune()) %>%
+    set_mode("classification") %>% 
+    set_engine("nnet", verbose = 0) #verbose = 0 reduces output from the model
+    
+  nn_workflow <- 
+    workflow() %>% 
+    add_recipe(nn_recipe) %>% 
+    add_model(nn_model) 
+  
+  set.seed(1234)
+  neural_res <-
+    tune_grid(nn_workflow, resamples = folds, grid = 25)
+ 
+```
+
+
+XGB Model
+```{r}
+  xgboost_recipe <- 
+     recipe(formula = Above_Median ~ ., data = train) %>% 
+     step_novel(all_nominal_predictors()) %>% 
+      step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+     step_zv(all_predictors()) 
+   
+   xgboost_spec <- 
+     boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), 
+       loss_reduction = tune(), sample_size = tune()) %>% 
+       set_mode("classification") %>% 
+       set_engine("xgboost") 
+   
+   xgboost_workflow <- 
+     workflow() %>% 
+     add_recipe(xgboost_recipe) %>% 
+     add_model(xgboost_spec) 
+   
+  set.seed(64069)
+     xgb_res <-
+     tune_grid(xgboost_workflow, resamples = folds, grid = 25)
+```
+
+
+Stacking
+```{r}
+# ames_stacks = stacks() %>%
+#   add_candidates(tree_res) %>%
+#   add_candidates(rf_res) %>%
+#   add_candidates(neural_res) %>%
+#   add_candidates(xgb_res) 
+
+```
+
+**At this point, I kept getting this error message: Error: The inputted `candidates` argument was not generated with the appropriate control settings. Please see ?control_stack. Nothing I read online, in R Help, or in any of our textbooks helped me fix this, so I gave up.**
+

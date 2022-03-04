@@ -1,0 +1,389 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+## Erin Seiling
+## Module 4. Classification Trees
+
+```{r warning - FALSE, message = FALSE}
+#install.packages("caret")
+#install.packages("rpart")
+#install.packages("rattle")
+#install.packages("RColorBrewer")
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(RColorBrewer)
+library(plyr)
+
+```
+
+```{r}
+heart_disease_1 <- read_csv("heart_disease-1.csv")
+heart <- heart_disease_1
+```
+
+Strucutre and Summary
+```{r}
+#str(heart)
+summary(heart)
+```
+
+
+Factor conversion and recoding
+```{r}
+heart = heart %>% mutate(Sex = as_factor(Sex)) %>%
+  mutate(ChestPainType = as_factor(ChestPainType)) %>%
+  mutate(RestingECG = as_factor(RestingECG)) %>%
+  mutate(ExerciseAngina = as_factor(ExerciseAngina)) %>%
+  mutate(HeartDisease = as_factor(HeartDisease)) %>%
+  mutate(ST_Slope = as_factor(ST_Slope)) %>%
+  mutate(HeartDisease = fct_recode(HeartDisease, "No" = "0", "Yes" = "1"))
+```
+
+Structure and Summary
+```{r}
+#str(heart)
+summary(heart)
+```
+
+## Task 1. Split into Train and Test
+
+```{r}
+set.seed(12345)
+heart_split = initial_split(heart, prop = 0.7, strata = HeartDisease) #70% in Training
+train = training(heart_split)
+test = testing(heart_split)
+
+```
+
+## Task 2. Create Classifcation Tree
+
+```{r}
+heart_recipe = recipe(HeartDisease ~., train) %>%
+  step_dummy(all_nominal_predictors())
+
+heart_model = decision_tree() %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+heart_wflow = 
+  workflow() %>%
+  add_model(heart_model) %>%
+  add_recipe(heart_recipe)
+
+heart_fit = fit(heart_wflow, train)
+```
+
+Extract the tree's fit
+```{r}
+tree = heart_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit")
+
+#Plot the tree
+fancyRpartPlot(tree)
+```
+
+## Task 3. Examine Complexity Parameter
+```{r}
+heart_fit$fit$fit$fit$cptable
+```
+
+**The optimal Cp value found by R is 0.28 (rounded).**
+
+## Task 4. Tuning Grid
+
+Create Folds
+```{r}
+set.seed(123)
+folds = vfold_cv(train, v=5)
+```
+
+Create model
+```{r}
+heart_recipe = recipe(HeartDisease ~., train) %>%
+  step_dummy(all_nominal_predictors())
+
+tree_model = decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_grid= grid_regular(cost_complexity(),
+                        levels = 25) #try 25 values for Cp
+
+heart_wflow = 
+  workflow() %>%
+  add_model(tree_model) %>%
+  add_recipe(heart_recipe)
+
+tree_res = 
+  heart_wflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+  )
+
+tree_res
+```
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow =2)
+```
+## Task 5. Which cp value yields optimal accuracy?
+```{r}
+heart_recipe = recipe(HeartDisease ~., train) %>%
+  step_dummy(all_nominal_predictors())
+
+tree_model = decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_grid= expand.grid(cost_complexity= seq(0.001, 0.01, by=0.001)) 
+                  
+heart_wflow = 
+  workflow() %>%
+  add_model(tree_model) %>%
+  add_recipe(heart_recipe)
+
+tree_res = 
+  heart_wflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+  )
+
+tree_res
+```
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow =2)
+```
+
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+**The cp value that yields the optimal "accuracy" value is 0.007.**
+
+## Task 6. Plot tree using Cp from Task 5.
+
+```{r}
+final_wf = 
+  heart_wflow %>%
+  finalize_workflow(best_tree)
+```
+
+```{r}
+final_fit = fit(final_wf, train)
+
+tree = final_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit")
+  
+fancyRpartPlot(tree)
+  
+```
+
+## Task 7. Accuracy of tree in Task 6
+
+Predictions on training set
+```{r}
+treepred = predict(final_fit, train, type = "class")
+head(treepred)
+```
+Confusion Matrix
+```{r}
+confusionMatrix(treepred$.pred_class,train$HeartDisease, positive="Yes")
+```
+
+**Accuracy is 0.88 (rounded).**
+
+## Task 8
+
+```{r}
+Blood <- read_csv("Blood.csv")
+Blood <- Blood %>% mutate(DonatedMarch = as_factor(DonatedMarch)) %>%
+  mutate(DonatedMarch = fct_recode(DonatedMarch, "No" = "0", "Yes" = "1"))
+#str(Blood)
+summary(Blood)
+```
+
+## Task 9. Create train and test
+
+```{r}
+set.seed(1234)
+blood_split = initial_split(Blood, prop = 0.7, strata = DonatedMarch) #70% in Training
+train2 = training(blood_split)
+test2 = testing(blood_split)
+```
+
+Create Folds
+```{r}
+set.seed(1234)
+folds = vfold_cv(train2, v=5)
+```
+
+Create model
+```{r}
+blood_recipe = recipe(DonatedMarch ~., train2) %>%
+  step_dummy(all_nominal_predictors())
+
+tree_model = decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_grid= grid_regular(cost_complexity(),
+                        levels = 25) #try 25 values for Cp
+
+blood_wflow = 
+  workflow() %>%
+  add_model(tree_model) %>%
+  add_recipe(blood_recipe)
+
+tree_res = 
+  blood_wflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+  )
+
+tree_res
+```
+
+Visualize
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow =2)
+```
+
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+**Best cp for "accuracy" found by R is 0.02 (rounded).**
+
+Tune cp
+```{r}
+blood_recipe = recipe(DonatedMarch ~., train2) %>%
+  step_dummy(all_nominal_predictors())
+
+tree_model = decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_grid= expand.grid(cost_complexity= seq(0.001, 0.04, by=0.01))
+
+blood_wflow = 
+  workflow() %>%
+  add_model(tree_model) %>%
+  add_recipe(blood_recipe)
+
+tree_res = 
+  blood_wflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+  )
+
+tree_res
+```
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow =2)
+```
+
+
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+
+**The cp value that yields "optimal" accuracy is 0.02.**
+
+## Task 10. Tree with optimal Cp from Task 9. 
+```{r}
+final_wf = 
+  blood_wflow %>%
+  finalize_workflow(best_tree)
+
+```
+
+```{r}
+final_fit = fit(final_wf, train2)
+
+tree = final_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit")
+  
+fancyRpartPlot(tree)
+```
+
+
+## Task 11.
+
+Predictions on Training set
+```{r}
+treepred = predict(final_fit, train2, type = "class")
+head(treepred)
+```
+
+Accuracy on Training Set
+```{r}
+confusionMatrix(treepred$.pred_class,train2$DonatedMarch, positive="Yes")
+```
+
+**Accuracy of model on Training set is 0.81 (rounded).**
+
+Predictions on Testing Set
+```{r}
+final_fit = fit(final_wf, test2)
+
+tree = final_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit")
+
+```
+
+```{r}
+treepred = predict(final_fit, test2, type = "class")
+head(treepred)
+
+```
+Accuracy on Testing Set
+```{r}
+confusionMatrix(treepred$.pred_class,test2$DonatedMarch, positive="Yes")
+```
+
+**Accuracy of model on Testing set is 0.83 (rounded).**
+
+**The accuracy of the model on the training set and the testing set is similar, 81% accurate on the training set and 83% accurate on the testing set. The p-values for both training and testing are significant, indicating that the model performs better than the naive model does.**
